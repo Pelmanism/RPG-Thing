@@ -138,14 +138,155 @@ class Entity:
     solid: bool = True
     talk_tree: Optional[DialogueTree] = None
     interaction_radius: float = 46.0
+    collider_size: Tuple[int, int] = (18, 12)
 
     def rect(self) -> pygame.Rect:
         surf = self.sprite._frame_surfaces[0]
         return pygame.Rect(int(self.pos.x), int(self.pos.y), surf.get_width(), surf.get_height())
 
+    def collider_rect(self) -> pygame.Rect:
+        # Smaller collider near the entity's "feet" so large ASCII art doesn't make interaction awkward.
+        surf = self.sprite._frame_surfaces[0]
+        cw, ch = self.collider_size
+        cw = min(cw, surf.get_width())
+        ch = min(ch, surf.get_height())
+        x = self.pos.x + (surf.get_width() - cw) / 2
+        y = self.pos.y + surf.get_height() - ch
+        return pygame.Rect(int(x), int(y), int(cw), int(ch))
+
 
 def _circle_near(a: pygame.Vector2, b: pygame.Vector2, radius: float) -> bool:
     return a.distance_to(b) <= radius
+
+
+# ---------------------------
+# ASCII tile map (editable)
+# ---------------------------
+
+
+@dataclass
+class AsciiTileMap:
+    lines: List[str]
+    tile_size: int = 24
+    wall_ch: str = "x"
+    floor_ch: str = "."
+    void_ch: str = " "
+    door_ch: str = "D"
+
+    def __post_init__(self) -> None:
+        if not self.lines:
+            raise ValueError("Map has no lines")
+        width = max(len(line) for line in self.lines)
+        self.lines = [line.ljust(width, self.void_ch) for line in self.lines]
+
+    @property
+    def width(self) -> int:
+        return len(self.lines[0])
+
+    @property
+    def height(self) -> int:
+        return len(self.lines)
+
+    def world_size_px(self) -> Tuple[int, int]:
+        return self.width * self.tile_size, self.height * self.tile_size
+
+    def tile_rect(self, tx: int, ty: int) -> pygame.Rect:
+        return pygame.Rect(tx * self.tile_size, ty * self.tile_size, self.tile_size, self.tile_size)
+
+    def tile_at(self, tx: int, ty: int) -> str:
+        if tx < 0 or ty < 0 or tx >= self.width or ty >= self.height:
+            return self.wall_ch
+        return self.lines[ty][tx]
+
+    def is_blocking_tile(self, ch: str, gs: GameState) -> bool:
+        if ch == self.wall_ch:
+            return True
+        if ch == self.door_ch and not gs.has("gate_open"):
+            return True
+        return False
+
+    def rect_collides(self, r: pygame.Rect, gs: GameState) -> bool:
+        tx0 = int(math.floor(r.left / self.tile_size))
+        ty0 = int(math.floor(r.top / self.tile_size))
+        tx1 = int(math.floor((r.right - 1) / self.tile_size))
+        ty1 = int(math.floor((r.bottom - 1) / self.tile_size))
+        for ty in range(ty0, ty1 + 1):
+            for tx in range(tx0, tx1 + 1):
+                ch = self.tile_at(tx, ty)
+                if self.is_blocking_tile(ch, gs):
+                    return True
+        return False
+
+    def draw(self, screen: pygame.Surface, camera: pygame.Vector2, gs: GameState) -> None:
+        floor_col = (18, 25, 18)
+        wall_col = (70, 80, 95)
+        void_col = (10, 12, 18)
+        door_col = (160, 120, 80)
+        door_open_col = (25, 40, 25)
+
+        screen.fill(void_col)
+
+        # Visible tile range
+        sw, sh = screen.get_size()
+        tx0 = int(_clamp(camera.x / self.tile_size, 0, self.width))
+        ty0 = int(_clamp(camera.y / self.tile_size, 0, self.height))
+        tx1 = int(_clamp((camera.x + sw) / self.tile_size + 1, 0, self.width))
+        ty1 = int(_clamp((camera.y + sh) / self.tile_size + 1, 0, self.height))
+
+        for ty in range(ty0, ty1):
+            row = self.lines[ty]
+            for tx in range(tx0, tx1):
+                ch = row[tx]
+                world = self.tile_rect(tx, ty)
+                dst = world.move(int(-camera.x), int(-camera.y))
+                if ch == self.floor_ch:
+                    pygame.draw.rect(screen, floor_col, dst)
+                elif ch == self.wall_ch:
+                    pygame.draw.rect(screen, wall_col, dst)
+                elif ch == self.door_ch:
+                    if gs.has("gate_open"):
+                        pygame.draw.rect(screen, door_open_col, dst)
+                    else:
+                        pygame.draw.rect(screen, door_col, dst)
+                        pygame.draw.rect(screen, (220, 190, 150), dst.inflate(-8, -8))
+                elif ch == self.void_ch:
+                    # Leave as void
+                    pass
+                else:
+                    # Treat unknown as floor for easy extension
+                    pygame.draw.rect(screen, floor_col, dst)
+
+
+def parse_map_and_spawns(raw_lines: Sequence[str]) -> Tuple[AsciiTileMap, Dict[str, Tuple[int, int]]]:
+    """
+    Map legend (editable in-file):
+    - x : wall (blocking)
+    - . : floor
+    - D : door (blocks until gate_open)
+    - P : player spawn
+    - E : Elder spawn
+    - G : Gatekeeper spawn
+    """
+
+    lines = [line.rstrip("\n") for line in raw_lines if line.strip("\n") != ""]
+    spawns: Dict[str, Tuple[int, int]] = {}
+    normalized: List[str] = []
+    for y, line in enumerate(lines):
+        out = []
+        for x, ch in enumerate(line):
+            if ch == "P":
+                spawns["player"] = (x, y)
+                out.append(".")
+            elif ch == "E":
+                spawns["elder"] = (x, y)
+                out.append(".")
+            elif ch == "G":
+                spawns["gatekeeper"] = (x, y)
+                out.append(".")
+            else:
+                out.append(ch)
+        normalized.append("".join(out))
+    return AsciiTileMap(normalized), spawns
 
 
 # ---------------------------
@@ -279,7 +420,27 @@ def main() -> int:
     pygame.init()
     pygame.display.set_caption("ASCII RPG Prototype")
 
-    screen_w, screen_h = 960, 540
+    # Editable ASCII map: tweak these lines to edit your level layout.
+    MAP_LINES = [
+        "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "x..............................................x",
+        "x....P.........................................x",
+        "x..............................................x",
+        "x..............xxxxxxx.......x.................x",
+        "x..............x.....x.......x.................x",
+        "x..............x.....x.......x.................x",
+        "x..............xxxxxxx.......x.................x",
+        "x............................x........G.........",
+        "x......E.....................x.................D",
+        "x............................x..................",
+        "x............................x.................x",
+        "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    ]
+    tile_map, spawns = parse_map_and_spawns(MAP_LINES)
+
+    world_w, world_h = tile_map.world_size_px()
+    screen_w = max(960, min(1280, world_w))
+    screen_h = max(540, min(720, world_h))
     screen = pygame.display.set_mode((screen_w, screen_h))
     clock = pygame.time.Clock()
 
@@ -351,10 +512,23 @@ def main() -> int:
     for s in (player_sprite, elder_sprite, gate_sprite):
         s.bake(font)
 
-    player = Entity("You", pygame.Vector2(180, 260), player_sprite, speed_px_s=150.0, solid=True)
+    def pos_from_tile(tile_key: str, sprite: AsciiSprite, fallback: Tuple[int, int]) -> pygame.Vector2:
+        tx, ty = spawns.get(tile_key, fallback)
+        surf = sprite._frame_surfaces[0]
+        x = tx * tile_map.tile_size + (tile_map.tile_size - surf.get_width()) / 2
+        y = ty * tile_map.tile_size + (tile_map.tile_size - surf.get_height()) / 2
+        return pygame.Vector2(x, y)
+
+    player = Entity(
+        "You",
+        pos_from_tile("player", player_sprite, (2, 2)),
+        player_sprite,
+        speed_px_s=150.0,
+        solid=True,
+    )
     elder = Entity(
         "Elder Kora",
-        pygame.Vector2(160, 120),
+        pos_from_tile("elder", elder_sprite, (8, 4)),
         elder_sprite,
         speed_px_s=0.0,
         solid=True,
@@ -363,7 +537,7 @@ def main() -> int:
     )
     gatekeeper = Entity(
         "Gatekeeper Bram",
-        pygame.Vector2(650, 230),
+        pos_from_tile("gatekeeper", gate_sprite, (18, 6)),
         gate_sprite,
         speed_px_s=0.0,
         solid=True,
@@ -372,18 +546,6 @@ def main() -> int:
     )
     npcs = [elder, gatekeeper]
 
-    # Simple obstacles + a "gate" that can open
-    obstacles: List[pygame.Rect] = [
-        pygame.Rect(0, 0, screen_w, 24),
-        pygame.Rect(0, 0, 24, screen_h),
-        pygame.Rect(0, screen_h - 24, screen_w, 24),
-        pygame.Rect(screen_w - 24, 0, 24, screen_h),
-        pygame.Rect(320, 120, 180, 26),
-        pygame.Rect(320, 146, 26, 180),
-        pygame.Rect(470, 146, 26, 180),
-    ]
-    gate_rect = pygame.Rect(820, 150, 26, 240)  # blocks path north until opened
-
     active_dialogue: Optional[ActiveDialogue] = None
 
     def try_move(entity: Entity, delta: pygame.Vector2) -> None:
@@ -391,28 +553,31 @@ def main() -> int:
             return
         old = entity.pos.copy()
         entity.pos.x += delta.x
-        if collides(entity.rect()):
+        if collides(entity.collider_rect(), ignore=entity):
             entity.pos.x = old.x
         entity.pos.y += delta.y
-        if collides(entity.rect()):
+        if collides(entity.collider_rect(), ignore=entity):
             entity.pos.y = old.y
 
-    def collides(r: pygame.Rect) -> bool:
-        for ob in obstacles:
-            if r.colliderect(ob):
-                return True
-        if not gs.has("gate_open") and r.colliderect(gate_rect):
+    def collides(r: pygame.Rect, *, ignore: Optional[Entity] = None) -> bool:
+        if tile_map.rect_collides(r, gs):
             return True
         for npc in npcs:
-            if npc.solid and r.colliderect(npc.rect()):
+            if ignore is npc:
+                continue
+            if npc.solid and r.colliderect(npc.collider_rect()):
                 return True
+        if ignore is not player and r.colliderect(player.collider_rect()):
+            return True
         return False
 
     def nearest_talkable() -> Optional[Entity]:
+        player_center = pygame.Vector2(player.collider_rect().center)
         for npc in npcs:
             if npc.talk_tree is None:
                 continue
-            if _circle_near(player.pos, npc.pos, npc.interaction_radius):
+            npc_center = pygame.Vector2(npc.collider_rect().center)
+            if _circle_near(player_center, npc_center, npc.interaction_radius):
                 return npc
         return None
 
@@ -513,44 +678,37 @@ def main() -> int:
             elif close_pressed and active_dialogue:
                 close_dialogue()
 
-        # --- Render world ---
-        screen.fill((14, 16, 22))
+        # --- Camera + render world ---
+        sw, sh = screen.get_size()
+        player_center = pygame.Vector2(player.collider_rect().center)
+        cam = player_center - pygame.Vector2(sw / 2, sh / 2)
+        max_cam_x = max(0, world_w - sw)
+        max_cam_y = max(0, world_h - sh)
+        cam.x = _clamp(cam.x, 0, max_cam_x)
+        cam.y = _clamp(cam.y, 0, max_cam_y)
 
-        # Ground tiles (simple color bands)
-        pygame.draw.rect(screen, (18, 25, 18), (24, 24, screen_w - 48, screen_h - 48))
-        pygame.draw.rect(screen, (18, 18, 28), (500, 80, 420, 260))
-
-        # Obstacles
-        for ob in obstacles:
-            pygame.draw.rect(screen, (60, 70, 80), ob)
-        if not gs.has("gate_open"):
-            pygame.draw.rect(screen, (120, 90, 60), gate_rect)
-            pygame.draw.rect(screen, (200, 160, 120), gate_rect.inflate(-8, -8))
-        else:
-            pygame.draw.rect(screen, (40, 70, 40), gate_rect)
-
-        # North path hint
-        pygame.draw.rect(screen, (30, 30, 30), (820, 24, 116, 110))
-        hint = ui_font.render("NORTH", True, (220, 220, 220))
-        screen.blit(hint, (840, 60))
+        tile_map.draw(screen, cam, gs)
 
         # NPCs
         for npc in npcs:
             surf = npc.sprite.surface_at(t_s)
-            screen.blit(surf, (npc.pos.x, npc.pos.y))
+            screen.blit(surf, (npc.pos.x - cam.x, npc.pos.y - cam.y))
             name_s = ui_font.render(npc.name, True, (210, 210, 210))
-            screen.blit(name_s, (npc.pos.x, npc.pos.y - 18))
+            screen.blit(name_s, (npc.pos.x - cam.x, npc.pos.y - cam.y - 18))
 
         # Player
         p_surf = player.sprite.surface_at(t_s)
-        screen.blit(p_surf, (player.pos.x, player.pos.y))
+        screen.blit(p_surf, (player.pos.x - cam.x, player.pos.y - cam.y))
 
         # Interaction prompt
         if active_dialogue is None:
             npc = nearest_talkable()
             if npc:
                 prompt = ui_font.render("Press E to talk", True, (240, 240, 200))
-                screen.blit(prompt, (player.pos.x - 8, player.pos.y + p_surf.get_height() + 6))
+                screen.blit(
+                    prompt,
+                    (player.pos.x - cam.x - 8, player.pos.y - cam.y + p_surf.get_height() + 6),
+                )
 
         # --- Render dialogue UI ---
         if active_dialogue is not None:
@@ -587,7 +745,7 @@ def main() -> int:
         status.append("coin" if gs.has("got_coin") else "no-coin")
         status.append("gate-open" if gs.has("gate_open") else "gate-closed")
         status_s = ui_font.render(" / ".join(status), True, (120, 130, 150))
-        screen.blit(status_s, (28, 28))
+        screen.blit(status_s, (16, 12))
 
         pygame.display.flip()
 
