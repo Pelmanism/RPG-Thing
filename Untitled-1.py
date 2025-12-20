@@ -257,7 +257,9 @@ class AsciiTileMap:
                     pygame.draw.rect(screen, floor_col, dst)
 
 
-def parse_map_and_spawns(raw_lines: Sequence[str]) -> Tuple[AsciiTileMap, Dict[str, Tuple[int, int]]]:
+def parse_map_and_spawns(
+    raw_lines: Sequence[str],
+) -> Tuple[AsciiTileMap, Dict[str, Tuple[int, int]], List[Tuple[int, int]]]:
     """
     Map legend (editable in-file):
     - x : wall (blocking)
@@ -266,10 +268,13 @@ def parse_map_and_spawns(raw_lines: Sequence[str]) -> Tuple[AsciiTileMap, Dict[s
     - P : player spawn
     - E : Elder spawn
     - G : Gatekeeper spawn
+    - H : Philosopher spawn
+    - T : transition trigger
     """
 
     lines = [line.rstrip("\n") for line in raw_lines if line.strip("\n") != ""]
     spawns: Dict[str, Tuple[int, int]] = {}
+    triggers: List[Tuple[int, int]] = []
     normalized: List[str] = []
     for y, line in enumerate(lines):
         out = []
@@ -283,10 +288,16 @@ def parse_map_and_spawns(raw_lines: Sequence[str]) -> Tuple[AsciiTileMap, Dict[s
             elif ch == "G":
                 spawns["gatekeeper"] = (x, y)
                 out.append(".")
+            elif ch == "H":
+                spawns["philosopher"] = (x, y)
+                out.append(".")
+            elif ch == "T":
+                triggers.append((x, y))
+                out.append(".")
             else:
                 out.append(ch)
         normalized.append("".join(out))
-    return AsciiTileMap(normalized), spawns
+    return AsciiTileMap(normalized), spawns, triggers
 
 
 # ---------------------------
@@ -409,7 +420,30 @@ def build_dialogues() -> Dict[str, DialogueTree]:
         },
     )
 
-    return {"elder": elder, "gatekeeper": gatekeeper}
+    philosopher = DialogueTree(
+        start_id="start",
+        nodes={
+            "start": DialogueNode(
+                id="start",
+                text="A quiet gaze meets you. The philosopher waits.",
+                choices=(
+                    DialogueChoice(
+                        "Why is that stupid people think they know stuff while smarter people aren't so "
+                        "sure about anything?",
+                        next_id="unsure",
+                    ),
+                    DialogueChoice("Goodbye.", next_id=None),
+                ),
+            ),
+            "unsure": DialogueNode(
+                id="unsure",
+                text="I'm not sure.",
+                choices=(DialogueChoice("Thanks.", next_id=None),),
+            )
+        },
+    )
+
+    return {"elder": elder, "gatekeeper": gatekeeper, "philosopher": philosopher}
 
 
 def main() -> int:
@@ -420,8 +454,8 @@ def main() -> int:
     pygame.init()
     pygame.display.set_caption("ASCII RPG Prototype")
 
-    # Editable ASCII map: tweak these lines to edit your level layout.
-    MAP_LINES = [
+    # Editable ASCII maps: tweak these lines to edit your level layouts.
+    MAP_LINES_1 = [
         "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
         "x..............................................x",
         "x....P.........................................x",
@@ -430,14 +464,28 @@ def main() -> int:
         "x..............x.....x.......x.................x",
         "x..............x.....x.......x.................x",
         "x..............xxxxxxx.......x.................x",
-        "x............................x........G.........",
-        "x......E.....................x.................D",
-        "x............................x..................",
+        "x............................x........G........xxxxx",
+        "x......E.....................x.................D..T.",
+        "x............................x.................xxxxx",
         "x............................x.................x",
         "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
     ]
-    tile_map, spawns = parse_map_and_spawns(MAP_LINES)
+    MAP_LINES_2 = [
+        "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "x..............x...............x",
+        "x..P...........x...............x",
+        "x..............x...............x",
+        "x.....xxxx.....x.....xxxxx.....x",
+        "x.....x..x...........x...x.....x",
+        "x.....x..x.....x.....x...x..H..x",
+        "x.....xxxx.....x.....xxxxx.....x",
+        "x..............................x",
+        "x............xxxx..............x",
+        "x..............................x",
+        "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    ]
 
+    tile_map, spawns, level_triggers = parse_map_and_spawns(MAP_LINES_1)
     world_w, world_h = tile_map.world_size_px()
     screen_w = max(960, min(1280, world_w))
     screen_h = max(540, min(720, world_h))
@@ -502,6 +550,24 @@ def main() -> int:
             ),
         ),
     )
+    philosopher_anim = AsciiAnim(
+        color=pygame.Color(200, 200, 230),
+        frame_time_s=0.3,
+        frames=(
+            (
+                r"  __  ",
+                r" (..)",
+                r" /||\ ",
+                r"  /\  ",
+            ),
+            (
+                r"  __  ",
+                r" (..)",
+                r" /||\ ",
+                r"  \/  ",
+            ),
+        ),
+    )
 
     dialogues = build_dialogues()
     gs = GameState()
@@ -509,44 +575,81 @@ def main() -> int:
     player_sprite = AsciiSprite(player_anim)
     elder_sprite = AsciiSprite(elder_anim)
     gate_sprite = AsciiSprite(gate_anim)
-    for s in (player_sprite, elder_sprite, gate_sprite):
+    philosopher_sprite = AsciiSprite(philosopher_anim)
+    for s in (player_sprite, elder_sprite, gate_sprite, philosopher_sprite):
         s.bake(font)
 
-    def pos_from_tile(tile_key: str, sprite: AsciiSprite, fallback: Tuple[int, int]) -> pygame.Vector2:
+    def pos_from_tile(
+        level_map: AsciiTileMap,
+        tile_key: str,
+        sprite: AsciiSprite,
+        fallback: Tuple[int, int],
+    ) -> pygame.Vector2:
         tx, ty = spawns.get(tile_key, fallback)
         surf = sprite._frame_surfaces[0]
-        x = tx * tile_map.tile_size + (tile_map.tile_size - surf.get_width()) / 2
-        y = ty * tile_map.tile_size + (tile_map.tile_size - surf.get_height()) / 2
+        x = tx * level_map.tile_size + (level_map.tile_size - surf.get_width()) / 2
+        y = ty * level_map.tile_size + (level_map.tile_size - surf.get_height()) / 2
         return pygame.Vector2(x, y)
+
+    def build_level_npcs(level_index: int, level_map: AsciiTileMap) -> List[Entity]:
+        if level_index == 1:
+            philosopher = Entity(
+                "Philosopher",
+                pos_from_tile(level_map, "philosopher", philosopher_sprite, (20, 6)),
+                philosopher_sprite,
+                speed_px_s=0.0,
+                solid=True,
+                talk_tree=dialogues["philosopher"],
+                interaction_radius=60,
+            )
+            return [philosopher]
+        if level_index != 0:
+            return []
+        elder = Entity(
+            "Elder Kora",
+            pos_from_tile(level_map, "elder", elder_sprite, (8, 4)),
+            elder_sprite,
+            speed_px_s=0.0,
+            solid=True,
+            talk_tree=dialogues["elder"],
+            interaction_radius=60,
+        )
+        gatekeeper = Entity(
+            "Gatekeeper Bram",
+            pos_from_tile(level_map, "gatekeeper", gate_sprite, (18, 6)),
+            gate_sprite,
+            speed_px_s=0.0,
+            solid=True,
+            talk_tree=dialogues["gatekeeper"],
+            interaction_radius=70,
+        )
+        return [elder, gatekeeper]
 
     player = Entity(
         "You",
-        pos_from_tile("player", player_sprite, (2, 2)),
+        pygame.Vector2(0, 0),
         player_sprite,
         speed_px_s=150.0,
         solid=True,
     )
-    elder = Entity(
-        "Elder Kora",
-        pos_from_tile("elder", elder_sprite, (8, 4)),
-        elder_sprite,
-        speed_px_s=0.0,
-        solid=True,
-        talk_tree=dialogues["elder"],
-        interaction_radius=60,
-    )
-    gatekeeper = Entity(
-        "Gatekeeper Bram",
-        pos_from_tile("gatekeeper", gate_sprite, (18, 6)),
-        gate_sprite,
-        speed_px_s=0.0,
-        solid=True,
-        talk_tree=dialogues["gatekeeper"],
-        interaction_radius=70,
-    )
-    npcs = [elder, gatekeeper]
+    current_level = 0
+    npcs: List[Entity] = []
 
     active_dialogue: Optional[ActiveDialogue] = None
+
+    def load_level(level_index: int) -> None:
+        nonlocal tile_map, spawns, level_triggers, world_w, world_h, npcs, active_dialogue, current_level
+        current_level = level_index
+        if level_index == 0:
+            tile_map, spawns, level_triggers = parse_map_and_spawns(MAP_LINES_1)
+        else:
+            tile_map, spawns, level_triggers = parse_map_and_spawns(MAP_LINES_2)
+        world_w, world_h = tile_map.world_size_px()
+        active_dialogue = None
+        npcs = build_level_npcs(level_index, tile_map)
+        player.pos = pos_from_tile(tile_map, "player", player_sprite, (2, 2))
+
+    load_level(0)
 
     def try_move(entity: Entity, delta: pygame.Vector2) -> None:
         if delta.length_squared() == 0:
@@ -613,6 +716,10 @@ def main() -> int:
             node.on_enter(gs)
         d.selected_idx = 0
 
+    def player_tile_pos() -> Tuple[int, int]:
+        center = player.collider_rect().center
+        return int(center[0] // tile_map.tile_size), int(center[1] // tile_map.tile_size)
+
     running = True
     t_s = 0.0
     max_time_s = 0.35 if smoke_test else float("inf")
@@ -659,6 +766,9 @@ def main() -> int:
                 npc = nearest_talkable()
                 if npc:
                     open_dialogue(npc)
+
+            if current_level == 0 and player_tile_pos() in level_triggers:
+                load_level(1)
 
         else:
             # Dialogue navigation
