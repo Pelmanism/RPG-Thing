@@ -269,6 +269,8 @@ def parse_map_and_spawns(
     - E : Elder spawn
     - G : Gatekeeper spawn
     - H : Philosopher spawn
+    - R : Ranger spawn
+    - A : Archivist spawn
     - T : transition trigger
     """
 
@@ -290,6 +292,12 @@ def parse_map_and_spawns(
                 out.append(".")
             elif ch == "H":
                 spawns["philosopher"] = (x, y)
+                out.append(".")
+            elif ch == "R":
+                spawns["ranger"] = (x, y)
+                out.append(".")
+            elif ch == "A":
+                spawns["archivist"] = (x, y)
                 out.append(".")
             elif ch == "T":
                 triggers.append((x, y))
@@ -425,7 +433,7 @@ def build_dialogues() -> Dict[str, DialogueTree]:
         nodes={
             "start": DialogueNode(
                 id="start",
-                text="A quiet gaze meets you. The philosopher waits.",
+                text="Greetings.",
                 choices=(
                     DialogueChoice(
                         "Why is that stupid people think they know stuff while smarter people aren't so "
@@ -443,7 +451,51 @@ def build_dialogues() -> Dict[str, DialogueTree]:
         },
     )
 
-    return {"elder": elder, "gatekeeper": gatekeeper, "philosopher": philosopher}
+    ranger = DialogueTree(
+        start_id="start",
+        nodes={
+            "start": DialogueNode(
+                id="start",
+                text="Trail's quiet today. Your steps aren't.",
+                choices=(
+                    DialogueChoice("What are you watching for?", next_id="watching"),
+                    DialogueChoice("Goodbye.", next_id=None),
+                ),
+            ),
+            "watching": DialogueNode(
+                id="watching",
+                text="Wind shifts, birds go still. That's when you listen.",
+                choices=(DialogueChoice("I'll listen.", next_id=None),),
+            ),
+        },
+    )
+
+    archivist = DialogueTree(
+        start_id="start",
+        nodes={
+            "start": DialogueNode(
+                id="start",
+                text="Every ruin has a footnote.",
+                choices=(
+                    DialogueChoice("Any advice for a traveler?", next_id="advice"),
+                    DialogueChoice("Goodbye.", next_id=None),
+                ),
+            ),
+            "advice": DialogueNode(
+                id="advice",
+                text="Catalog your mistakes. They repeat faster than legends.",
+                choices=(DialogueChoice("Thanks.", next_id=None),),
+            ),
+        },
+    )
+
+    return {
+        "elder": elder,
+        "gatekeeper": gatekeeper,
+        "philosopher": philosopher,
+        "ranger": ranger,
+        "archivist": archivist,
+    }
 
 
 def main() -> int:
@@ -480,12 +532,41 @@ def main() -> int:
         "x.....x..x.....x.....x...x..H..x",
         "x.....xxxx.....x.....xxxxx.....x",
         "x..............................x",
+        "x............xxxx..............T",
+        "x..............................x",
+        "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    ]
+    MAP_LINES_3 = [
+        "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "x..............x...............x",
+        "x..P...........x...............x",
+        "x..............x...............x",
+        "x.....xxxx.....x.....xxxxx.....x",
+        "x.....x..x.....x.....x...x.....x",
+        "x..R..x..x...........x...x.....x",
+        "x.....xxxx.....x.....xxxxx.....x",
+        "x.........................T....x",
         "x............xxxx..............x",
         "x..............................x",
         "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
     ]
+    MAP_LINES_4 = [
+        "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "x..............x...............x",
+        "x..P...........x...............x",
+        "x..............x...............x",
+        "x.....xxxx.....x.....xxxxx.....x",
+        "x.....x..x.....x.....x...x.....x",
+        "x.....x..x...........x...x..A..x",
+        "x.....xxxx.....x.....xxxxx.....x",
+        "x..............................x",
+        "x............xxxx..............x",
+        "x..............................x",
+        "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    ]
+    LEVEL_MAPS = [MAP_LINES_1, MAP_LINES_2, MAP_LINES_3, MAP_LINES_4]
 
-    tile_map, spawns, level_triggers = parse_map_and_spawns(MAP_LINES_1)
+    tile_map, spawns, level_triggers = parse_map_and_spawns(LEVEL_MAPS[0])
     world_w, world_h = tile_map.world_size_px()
     screen_w = max(960, min(1280, world_w))
     screen_h = max(540, min(720, world_h))
@@ -568,6 +649,42 @@ def main() -> int:
             ),
         ),
     )
+    ranger_anim = AsciiAnim(
+        color=pygame.Color(140, 220, 140),
+        frame_time_s=0.26,
+        frames=(
+            (
+                r"  /\  ",
+                r" (..) ",
+                r" /||\ ",
+                r"  /\  ",
+            ),
+            (
+                r"  /\  ",
+                r" (..) ",
+                r" /||\ ",
+                r"  \/  ",
+            ),
+        ),
+    )
+    archivist_anim = AsciiAnim(
+        color=pygame.Color(220, 200, 150),
+        frame_time_s=0.28,
+        frames=(
+            (
+                r"  __  ",
+                r" (..) ",
+                r" /||\ ",
+                r"  /\  ",
+            ),
+            (
+                r"  __  ",
+                r" (..) ",
+                r" /||\ ",
+                r"  \/  ",
+            ),
+        ),
+    )
 
     dialogues = build_dialogues()
     gs = GameState()
@@ -576,7 +693,16 @@ def main() -> int:
     elder_sprite = AsciiSprite(elder_anim)
     gate_sprite = AsciiSprite(gate_anim)
     philosopher_sprite = AsciiSprite(philosopher_anim)
-    for s in (player_sprite, elder_sprite, gate_sprite, philosopher_sprite):
+    ranger_sprite = AsciiSprite(ranger_anim)
+    archivist_sprite = AsciiSprite(archivist_anim)
+    for s in (
+        player_sprite,
+        elder_sprite,
+        gate_sprite,
+        philosopher_sprite,
+        ranger_sprite,
+        archivist_sprite,
+    ):
         s.bake(font)
 
     def pos_from_tile(
@@ -603,6 +729,28 @@ def main() -> int:
                 interaction_radius=60,
             )
             return [philosopher]
+        if level_index == 2:
+            ranger = Entity(
+                "Ranger",
+                pos_from_tile(level_map, "ranger", ranger_sprite, (6, 6)),
+                ranger_sprite,
+                speed_px_s=0.0,
+                solid=True,
+                talk_tree=dialogues["ranger"],
+                interaction_radius=60,
+            )
+            return [ranger]
+        if level_index == 3:
+            archivist = Entity(
+                "Archivist",
+                pos_from_tile(level_map, "archivist", archivist_sprite, (22, 6)),
+                archivist_sprite,
+                speed_px_s=0.0,
+                solid=True,
+                talk_tree=dialogues["archivist"],
+                interaction_radius=60,
+            )
+            return [archivist]
         if level_index != 0:
             return []
         elder = Entity(
@@ -639,14 +787,11 @@ def main() -> int:
 
     def load_level(level_index: int) -> None:
         nonlocal tile_map, spawns, level_triggers, world_w, world_h, npcs, active_dialogue, current_level
-        current_level = level_index
-        if level_index == 0:
-            tile_map, spawns, level_triggers = parse_map_and_spawns(MAP_LINES_1)
-        else:
-            tile_map, spawns, level_triggers = parse_map_and_spawns(MAP_LINES_2)
+        current_level = int(_clamp(level_index, 0, len(LEVEL_MAPS) - 1))
+        tile_map, spawns, level_triggers = parse_map_and_spawns(LEVEL_MAPS[current_level])
         world_w, world_h = tile_map.world_size_px()
         active_dialogue = None
-        npcs = build_level_npcs(level_index, tile_map)
+        npcs = build_level_npcs(current_level, tile_map)
         player.pos = pos_from_tile(tile_map, "player", player_sprite, (2, 2))
 
     load_level(0)
@@ -767,8 +912,8 @@ def main() -> int:
                 if npc:
                     open_dialogue(npc)
 
-            if current_level == 0 and player_tile_pos() in level_triggers:
-                load_level(1)
+            if player_tile_pos() in level_triggers and current_level < len(LEVEL_MAPS) - 1:
+                load_level(current_level + 1)
 
         else:
             # Dialogue navigation
